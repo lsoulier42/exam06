@@ -7,6 +7,7 @@
 #include <string.h>
 #include <errno.h>
 #include <arpa/inet.h>
+#define BUFFER_SIZE 10000000
 
 int g_id = 0;
 
@@ -25,6 +26,7 @@ int add_client(c_list **head, int fd) {
 		return (0);
 	new_c->fd = fd;
 	new_c->id = g_id;
+	new_c->next = NULL;
 
 	if (!track) {
 		*head = new_c;
@@ -47,15 +49,14 @@ int rm_client(c_list **head, int fd) {
 			prev = track;
 			track = track->next;
 		}
-		if (track)
+		if (track) {
 			id = track->id;
-		if (prev && track && track->next)
-			prev->next = track->next;
-		if (!prev && track && track->next)
-			*head = track->next;
-		else
-			*head = prev;
-		free(track);
+			if (!prev)
+				*head = track->next;
+			else
+				prev->next = track->next;
+			free(track);
+		}
 	}
 	return (id);
 }
@@ -112,16 +113,67 @@ void send_all(int highest_fd, fd_set fd_master, int server_fd, char *str, int fd
 	}
 }
 
+int extract_message(char **buf, char **msg)
+{
+	char	*newbuf;
+	int	i;
+
+	*msg = 0;
+	if (*buf == 0)
+		return (0);
+	i = 0;
+	while ((*buf)[i])
+	{
+		if ((*buf)[i] == '\n')
+		{
+			newbuf = calloc(1, sizeof(*newbuf) * (strlen(*buf + i + 1) + 1));
+			if (newbuf == 0)
+				return (-1);
+			strcpy(newbuf, *buf + i + 1);
+			*msg = *buf;
+			(*msg)[i + 1] = 0;
+			*buf = newbuf;
+			return (1);
+		}
+		i++;
+	}
+	return (0);
+}
+
+char *str_join(char *buf, char *add)
+{
+	char	*newbuf;
+	int		len;
+
+	if (buf == 0)
+		len = 0;
+	else
+		len = strlen(buf);
+	newbuf = malloc(sizeof(*newbuf) * (len + strlen(add) + 1));
+	if (newbuf == 0)
+		return (0);
+	newbuf[0] = 0;
+	if (buf != 0)
+		strcat(newbuf, buf);
+	free(buf);
+	strcat(newbuf, add);
+	return (newbuf);
+}
+
+
 int main(int argc, char **argv) {
 	int server_fd;
 	c_list *head;
 	int highest_fd;
 	fd_set fd_read;
 	fd_set fd_master;
-	char str[8192];
+	char *str;
 	int fd_it;
 	int id_msg;
-	
+	char *msg;
+	char *str_msg;
+	int ret_recv;
+
 	if (argc != 2) {
 		write_error("Wrong number of arguments");
 		exit(1);
@@ -139,17 +191,33 @@ int main(int argc, char **argv) {
 	highest_fd = server_fd;
 	head = NULL;
 
+	str = (char*)calloc(1, 1);
+	if (!str) {
+		write_error("Fatal error");
+		exit(1);
+	}
+
+	str_msg = (char*)calloc(1, BUFFER_SIZE);
+	if (!str_msg) {
+		write_error("Fatal error");
+		exit(1);
+	}
+
+
 	while (1) {
 		fd_read = fd_master;
 		select(highest_fd + 1, &fd_read, NULL, NULL, NULL);
 		fd_it = 0;
 		while (fd_it < highest_fd + 1) {
-			bzero(str, 8192);
 			if (FD_ISSET(fd_it, &fd_read)) {
 				struct sockaddr_in c_addr;
 				socklen_t len;
-				char buffer[4096];
-				bzero(&buffer, 4096);
+				char *buffer;
+				buffer = (char*)calloc(sizeof(char), (BUFFER_SIZE + 1));
+				if (!buffer) {
+					write_error("Fatal error");
+					exit(1);
+				}
 				
 				if (fd_it == server_fd) {
 					int new_fd;
@@ -159,28 +227,37 @@ int main(int argc, char **argv) {
 						highest_fd = new_fd;
 					FD_SET(new_fd, &fd_master);
 					id_msg = add_client(&head, new_fd);
-					sprintf(str, "client %d has joined\n", id_msg);
-					send_all(highest_fd, fd_master, server_fd, str, -1);
+					sprintf(str_msg, "client %d has joined\n", id_msg);
+					send_all(highest_fd, fd_master, server_fd, str_msg, new_fd);
+					bzero(str_msg, BUFFER_SIZE);
 				} else {
-					if (recv(fd_it, buffer, 4096, 0) <= 0) {
+					if ((ret_recv = recv(fd_it, buffer, BUFFER_SIZE, 0)) <= 0) {
 						id_msg = rm_client(&head, fd_it);
 						if (id_msg >= 0) {
-							sprintf(str, "client %d has left\n", id_msg);
-							send_all(highest_fd, fd_master, server_fd, str, fd_it);
+							sprintf(str_msg, "client %d has left\n", id_msg);
+							send_all(highest_fd, fd_master, server_fd, str_msg, fd_it);
+							bzero(str_msg, BUFFER_SIZE);
 						}
 						close(fd_it);
 						FD_CLR(fd_it, &fd_master);
 					} else {
+						buffer[ret_recv] = '\0';
 						id_msg = get_client_id(head, fd_it);
-						sprintf(str, "client %d: %s", id_msg, buffer);
+						while (strlen(buffer) != 0) {
+							extract_message(&buffer, &msg);
+							bzero(str_msg, BUFFER_SIZE);
+							sprintf(str_msg, "client %d: %s", id_msg, msg);
+							str = str_join(str, str_msg);
+							free(msg);
+						}
 						send_all(highest_fd, fd_master, server_fd, str, fd_it);
-					}	
+						str[0] = '\0';
+					}
 				}
+				free(buffer);
 			}
 			fd_it++;
 		}
 	}
-
 	return (0);
 }
-
